@@ -64,6 +64,7 @@ get_remote_board <- function(raw_inputs_path) {
 build_updated_pins_yaml <- function(remote_pins, tmp_pins) {
   remote_pins |>
     dplyr::bind_rows(tmp_pins) |>
+    dplyr::mutate(version = stringr::str_glue("{pin}/{version}/")) |>
     dplyr::arrange(pin, version) |>
     dplyr::summarise(versions = list(version), .by = c("pin")) |>
     tibble::deframe()
