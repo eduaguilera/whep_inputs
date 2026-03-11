@@ -36,9 +36,12 @@ upload_file <- function(local_path, tmp_board_path, root_path) {
   if (fs::is_dir(local_path)) {
     maybe_create_remote_folder(remote_path)
   } else {
-    kwb.nextcloud::upload_file(
-      file = local_path,
-      target_path = fs::path_dir(remote_path)
+    httr::with_config(
+      httr::progress("up"),
+      kwb.nextcloud::upload_file(
+        file = local_path,
+        target_path = fs::path_dir(remote_path)
+      )
     )
   }
 }
@@ -86,11 +89,14 @@ write_tmp_pins_yaml <- function(remote_board, tmp_board) {
 update_pins_yaml <- function(tmp_board, remote_path) {
   remote_board <- get_remote_board(remote_path)
 
-  kwb.nextcloud::upload_file(
-    file = write_tmp_pins_yaml(remote_board, tmp_board),
-    target_path = remote_path |>
-      add_whep_prefix() |>
-      utils::URLencode()
+  httr::with_config(
+    httr::progress("up"),
+    kwb.nextcloud::upload_file(
+      file = write_tmp_pins_yaml(remote_board, tmp_board),
+      target_path = remote_path |>
+        add_whep_prefix() |>
+        utils::URLencode()
+    )
   )
 }
 
