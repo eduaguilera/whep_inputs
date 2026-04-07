@@ -104,7 +104,7 @@ add_whep_prefix <- function(path) {
   fs::path("WHEP_ERC 2025", path)
 }
 
-save_processed_tibble <- function(data, name, ...) {
+save_processed_tibble <- function(data, name, year_col = NULL, ...) {
   tmp_dir <- tempdir()
   paths <- file.path(
     tmp_dir,
@@ -114,8 +114,29 @@ save_processed_tibble <- function(data, name, ...) {
     )
   )
 
+  # Auto-detect year column if not provided
+  if (is.null(year_col)) {
+    candidates <- intersect(c("Year", "year"), colnames(data))
+    year_col <- if (length(candidates) > 0) candidates[[1]] else NULL
+  }
+
+  if (is.null(year_col)) {
+    cli::cli_warn("{name}: no year column found, parquet will not be sorted by year")
+  } else {
+    data <- dplyr::arrange(data, .data[[year_col]])
+  }
+
   readr::write_csv(data, paths[[1]])
-  nanoparquet::write_parquet(data, paths[[2]])
+  arrow::write_parquet(data, paths[[2]], chunk_size = 500000L)
+
+  # Verify written row count matches source
+  written_rows <- arrow::read_parquet(paths[[2]], col_select = 1L) |> nrow()
+  if (written_rows != nrow(data)) {
+    cli::cli_abort("{name}: parquet has {written_rows} rows but source has {nrow(data)}")
+  }
+
+  n_groups <- arrow::ParquetFileReader$create(paths[[2]])$num_row_groups
+  cli::cli_alert_info("{name}: {written_rows} rows, {n_groups} row groups")
 
   paths
 }

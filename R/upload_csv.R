@@ -1,6 +1,6 @@
 source("R/upload_utils.R")
 
-upload_csv <- function(csv_path, pin_name, whep_inputs_path = fs::path("Model inputs", "world")) {
+upload_csv <- function(csv_path, pin_name, whep_inputs_path = fs::path("Model inputs", "world"), year_col = NULL) {
   if (!fs::file_exists(csv_path)) {
     cli::cli_abort("File not found: {csv_path}")
   }
@@ -12,7 +12,7 @@ upload_csv <- function(csv_path, pin_name, whep_inputs_path = fs::path("Model in
   csv_path |>
     readr::read_csv(show_col_types = FALSE) |>
     tibble::tibble() |>
-    save_processed_tibble(pin_name) |>
+    save_processed_tibble(pin_name, year_col = year_col) |>
     prepare_for_upload(pin_name) |>
     upload_remote(whep_inputs_path) |>
     update_pins_yaml(whep_inputs_path)
@@ -22,12 +22,9 @@ upload_csv <- function(csv_path, pin_name, whep_inputs_path = fs::path("Model in
 
 # ---------------------------------------------------------------------------- #
 # INSTRUCTIONS:
-# Edit the variables below to point to your local CSV file, then run this script.
-# The input path does not need to be within the repository.
+# Uncomment and run one upload_csv() call at a time.
 # ---------------------------------------------------------------------------- #
 
-example_csv_path <- "~/Downloads/Land.csv"
-example_pin_name <- "land"
-target_remote_path <- fs::path("Model inputs", "world")
+remote_path <- fs::path("Model inputs", "world")
 
-upload_csv(example_csv_path, example_pin_name, target_remote_path)
+upload_csv("~/Downloads/Trade_DetailedTradeMatrix_E_All_Data_(Normalized).csv", "faostat-trade-bilateral", remote_path)
