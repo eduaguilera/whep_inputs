@@ -28,6 +28,11 @@ upload_remote <- function(tmp_board, remote_path) {
   tmp_board
 }
 
+nextcloud_path_user <- function() {
+  id <- Sys.getenv("NEXTCLOUD_USER_ID")
+  if (nzchar(id)) id else Sys.getenv("NEXTCLOUD_USER")
+}
+
 upload_file <- function(local_path, tmp_board_path, root_path) {
   rel_path <- stringr::str_remove(local_path, tmp_board_path)
   remote_path <- fs::path(root_path, rel_path) |>
@@ -40,18 +45,22 @@ upload_file <- function(local_path, tmp_board_path, root_path) {
       httr::progress("up"),
       kwb.nextcloud::upload_file(
         file = local_path,
-        target_path = fs::path_dir(remote_path)
+        target_path = fs::path_dir(remote_path),
+        user = nextcloud_path_user()
       )
     )
   }
 }
 
 maybe_create_remote_folder <- function(remote_path) {
-  tryCatch(kwb.nextcloud::create_folder(remote_path), error = function(e) {
-    if (!stringr::str_detect(e$message, "already exists")) {
-      cli::cli_abort("Unexpected error: {e$message}")
+  tryCatch(
+    kwb.nextcloud::create_folder(remote_path, user = nextcloud_path_user()),
+    error = function(e) {
+      if (!stringr::str_detect(e$message, "already exists")) {
+        cli::cli_abort("Unexpected error: {e$message}")
+      }
     }
-  })
+  )
 }
 
 get_remote_board <- function(raw_inputs_path) {
@@ -95,7 +104,8 @@ update_pins_yaml <- function(tmp_board, remote_path) {
       file = write_tmp_pins_yaml(remote_board, tmp_board),
       target_path = remote_path |>
         add_whep_prefix() |>
-        utils::URLencode()
+        utils::URLencode(),
+      user = nextcloud_path_user()
     )
   )
 }
