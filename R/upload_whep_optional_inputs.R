@@ -6,10 +6,13 @@ default_lpjml_grass_run_dir <- function() {
     return(env_path)
   }
 
+  # The 1901-2009 run this used to name was deleted in the 2026-07 cleanup; the
+  # current run is the 1901-2023 one. Kept as a convenience fallback only --
+  # WHEP_LPJML_RUN_DIR above is the supported way to point at a run.
   local_path <- paste0(
     "/home/usuario/Nextcloud/WHEP_ERC 2025/Sources/datasets/",
     "unclassified_datasets/LPJmL/LPJmL_runs/",
-    "global_1901-2009_spinup_200_our_inputs_grassland_livestock_npp_vegc_fix"
+    "global_1901-2023_spinup_200_our_inputs"
   )
 
   if (fs::dir_exists(local_path)) local_path else NA_character_
@@ -174,6 +177,42 @@ prepare_whep_lpjml_grass_artifacts <- function(
     "lpjml-grass-availability" = availability_path,
     "lpjml-grass-productivity" = productivity_path
   )
+}
+
+#' Upload the two LPJmL-derived SOC/nitrogen artifacts.
+#'
+#' These exist so a WHEP user never has to run LPJmL to get the historical
+#' carbon balance and the gridded nitrogen balance that depends on it. Both
+#' carry ONLY LPJmL-derived quantities: the grazing excreta, the humification
+#' fractions, CRU air temperature and the HWSD texture products are all
+#' computed locally by the package, so pinning these two layers freezes nothing
+#' a user could otherwise choose or download.
+#'
+#' Generate the files with the whep-side generator (they need the package's
+#' readers), then pass their paths here.
+upload_whep_lpjml_soc_artifacts <- function(
+  net_c_path,
+  hydrology_path,
+  remote_path = default_whep_inputs_path(),
+  type = c("files", "auto", "tabular")
+) {
+  type <- match.arg(type)
+
+  paths <- c(
+    "lpjml-grass-natural-net-c" = net_c_path,
+    "lpjml-soc-hydrology" = hydrology_path
+  )
+
+  validate_input_paths(unname(paths), allow_dirs = FALSE)
+
+  purrr::iwalk(paths, function(local_path, pin_name) {
+    cli::cli_alert_info(
+      "Uploading {.val {pin_name}} ({round(fs::file_size(local_path) / 1024^2)} MB)"
+    )
+    upload_input(local_path, pin_name, remote_path = remote_path, type = type)
+  })
+
+  invisible(paths)
 }
 
 resolve_lpjml_output_dir <- function(run_dir) {
