@@ -172,15 +172,34 @@ prepare_whep_lpjml_soc_artifacts <- function(
 build_lpjml_soc_hydrology <- function(whep, run_dir, years) {
   years <- years %||% lpjml_hydrology_years(run_dir)
   cli::cli_alert_info("SOC hydrology: {length(years)} years, one at a time")
-  parts <- lapply(seq_along(years), function(i) {
+
+  # Each year is written to DISK and dropped, rather than kept in a list.
+  #
+  # Chunking alone was not enough. Per year the live result is only ~40 MB
+  # (705,540 rows), but reading it costs ~19e6 transient rows -- 14.4e6 of them
+  # just the six SWC layers before the shallowest is selected -- and R does not
+  # return that heap to the OS. Accumulating in a list grew resident memory
+  # ~1.76 GB per year, reaching 43.9 GB by year 25 and heading for ~216 GB.
+  # Spilling to parquet caps the peak at one year plus the final assembly.
+  spill <- fs::path(tempdir(), "soc_hydrology_years")
+  fs::dir_create(spill)
+  on.exit(fs::dir_delete(spill), add = TRUE)
+
+  for (i in seq_along(years)) {
     # A plain message every 25 years: a cli progress bar cannot be updated from
-    # inside lapply(), being bound to the frame that created it.
+    # inside a loop body in another frame.
     if (i %% 25L == 0L) {
       cli::cli_alert_info("  ...{years[[i]]} ({i}/{length(years)})")
     }
-    build_lpjml_soc_hydrology_year(whep, run_dir, years[[i]])
-  })
-  dplyr::bind_rows(parts)
+    part <- build_lpjml_soc_hydrology_year(whep, run_dir, years[[i]])
+    nanoparquet::write_parquet(part, fs::path(spill, paste0(years[[i]], ".parquet")))
+    rm(part)
+    invisible(gc(verbose = FALSE))
+  }
+
+  files <- fs::dir_ls(spill, glob = "*.parquet")
+  data.table::rbindlist(lapply(files, nanoparquet::read_parquet)) |>
+    tibble::as_tibble()
 }
 
 build_lpjml_soc_hydrology_year <- function(whep, run_dir, year) {
