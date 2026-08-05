@@ -160,12 +160,54 @@ prepare_whep_lpjml_soc_artifacts <- function(
 # behind it: it is three monthly variables joined on cell-month. Assembled to
 # the schema get_soc_climate_drivers() checks for, and topsoil is the shallowest
 # SWC layer, matching WHEP's .wb_swc_topsoil().
+#
+# BUILT ONE YEAR AT A TIME, and that is not premature optimisation -- reading
+# the whole span at once gets the process OOM-killed. SWC is 4-D: the reader
+# returns every soil layer and the shallowest is selected afterwards, so a
+# full-span read materialises 720 x 277 x 6 layers x 1476 months = 1.77e9 rows
+# (~66 GB, observed 113 GB resident before the kernel killed it) to keep the
+# 86.8e6 that survive the land mask and the layer filter. Chunking caps the peak
+# at one year (~0.7e6 output rows) and costs nothing, because the NetCDF reads
+# are already sliced by time.
 build_lpjml_soc_hydrology <- function(whep, run_dir, years) {
+  years <- years %||% lpjml_hydrology_years(run_dir)
+  cli::cli_alert_info("SOC hydrology: {length(years)} years, one at a time")
+
+  # Each year is written to DISK and dropped, rather than kept in a list.
+  #
+  # Chunking alone was not enough. Per year the live result is only ~40 MB
+  # (705,540 rows), but reading it costs ~19e6 transient rows -- 14.4e6 of them
+  # just the six SWC layers before the shallowest is selected -- and R does not
+  # return that heap to the OS. Accumulating in a list grew resident memory
+  # ~1.76 GB per year, reaching 43.9 GB by year 25 and heading for ~216 GB.
+  # Spilling to parquet caps the peak at one year plus the final assembly.
+  spill <- fs::path(tempdir(), "soc_hydrology_years")
+  fs::dir_create(spill)
+  on.exit(fs::dir_delete(spill), add = TRUE)
+
+  for (i in seq_along(years)) {
+    # A plain message every 25 years: a cli progress bar cannot be updated from
+    # inside a loop body in another frame.
+    if (i %% 25L == 0L) {
+      cli::cli_alert_info("  ...{years[[i]]} ({i}/{length(years)})")
+    }
+    part <- build_lpjml_soc_hydrology_year(whep, run_dir, years[[i]])
+    nanoparquet::write_parquet(part, fs::path(spill, paste0(years[[i]], ".parquet")))
+    rm(part)
+    invisible(gc(verbose = FALSE))
+  }
+
+  files <- fs::dir_ls(spill, glob = "*.parquet")
+  data.table::rbindlist(lapply(files, nanoparquet::read_parquet)) |>
+    tibble::as_tibble()
+}
+
+build_lpjml_soc_hydrology_year <- function(whep, run_dir, year) {
   monthly <- function(var) {
     whep$read_lpjml_hydrology(
       var,
       run_dir = run_dir,
-      years = years,
+      years = year,
       monthly = TRUE
     ) |>
       tibble::as_tibble()
@@ -206,7 +248,30 @@ build_lpjml_soc_hydrology <- function(whep, run_dir, years) {
   key <- c("lon", "lat", "year", "month")
   swc |>
     dplyr::inner_join(prec, by = key) |>
-    dplyr::inner_join(irrig, by = key)
+    dplyr::inner_join(irrig, by = key) |>
+    # Drop ocean. The readers return the full 720 x 277 grid, so 199,440 cells
+    # arrive per month of which only 58,795 are land; the rest are fill. The
+    # existing pin holds the land mask alone, and keeping the fill rows would
+    # inflate the artifact 3.4x and change how every downstream join behaves.
+    # Verified against the pin for 2000: 705,540 finite rows on both sides.
+    dplyr::filter(
+      is.finite(.data$swc_topsoil),
+      is.finite(.data$prec_mm),
+      is.finite(.data$irrig_mm)
+    )
+}
+
+# Calendar years present in the run, read from the monthly time axis rather
+# than assumed, so a run with a different span chunks correctly.
+lpjml_hydrology_years <- function(run_dir, first_year = 1901L) {
+  path <- fs::path(run_dir, "mswc.nc")
+  if (!fs::file_exists(path)) {
+    cli::cli_abort("No {.file mswc.nc} in {.path {run_dir}}.")
+  }
+  nc <- ncdf4::nc_open(path)
+  on.exit(ncdf4::nc_close(nc), add = TRUE)
+  n_months <- nc$dim[["time"]]$len
+  first_year + seq_len(n_months %/% 12L) - 1L
 }
 
 # WHEP's readers are needed for two of the four artifacts. Loaded rather than
@@ -270,8 +335,18 @@ report_lpjml_pin_manifest <- function(paths) {
 # ratio: a mean that moves while the median does not (or moves the other way)
 # is a change in the distribution's shape rather than a rescaling, and anything
 # downstream that averages the layer will behave differently in the two cases.
-report_lpjml_pin_comparison <- function(paths, whep_path) {
+#
+# Restricted to COMPARE_YEARS, and the restriction is announced rather than
+# silent. Joining the full span of the hydrology layer would be 86.8e6 rows
+# against 86.8e6 on four keys; a decade is enough to judge a magnitude, which is
+# all this is for.
+COMPARE_YEARS <- 2000:2010
+
+report_lpjml_pin_comparison <- function(paths, whep_path, years = COMPARE_YEARS) {
   cli::cli_h2("Change vs the pins these would replace")
+  cli::cli_alert_info(
+    "Compared over {min(years)}-{max(years)} only, not the full span."
+  )
   whep <- load_whep_namespace(whep_path)
   specs <- lpjml_pin_compare_specs()
 
@@ -289,7 +364,13 @@ report_lpjml_pin_comparison <- function(paths, whep_path) {
       next
     }
     new <- tibble::as_tibble(nanoparquet::read_parquet(paths[[name]]))
+    if ("year" %in% names(new) && "year" %in% names(old)) {
+      new <- dplyr::filter(new, .data$year %in% years)
+      old <- dplyr::filter(old, .data$year %in% years)
+    }
     cli::cli_alert_info(compare_one_pin(new, old, spec, name))
+    rm(new, old)
+    invisible(gc(verbose = FALSE))
   }
 }
 
