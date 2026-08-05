@@ -31,6 +31,30 @@ Your username and password are needed to be able to upload files to the Nextclou
 
 The codes included here should both upload the raw inputs used (original data), just for transparency, and the cleaner format ones that will be used in the whep R package. You can see an example in `R/process_example.R`. I suggest creating new files for new related inputs, following the style of this one.
 
+## Dependencies
+
+There is no `renv` here: the upload path needs `kwb.nextcloud` while the
+artifact generators need `data.table` and `pkgload`, and keeping a project
+library meant those two sets never coexisted in one session — so
+`regenerate_whep_lpjml_pins(upload = TRUE)` could not run in a single call.
+Everything now resolves from the user library instead.
+
+Install once, into the user library:
+
+```r
+install.packages(c(
+  "arrow", "cli", "data.table", "dplyr", "fs", "httr", "nanoparquet",
+  "ncdf4", "pins", "pkgload", "purrr", "readr", "rlang", "stringr",
+  "tibble", "yaml"
+))
+# Not on CRAN -- the Nextcloud client the upload uses:
+remotes::install_github("KWB-R/kwb.nextcloud")   # pulls kwb.file, kwb.utils
+```
+
+`NEXTCLOUD_WHEP` must be set (see `.Renviron`) for anything that touches the
+board. Note that `Rscript --vanilla` skips `.Renviron`, so uploads run with a
+plain `Rscript`.
+
 ## Upload types
 
 Use `R/upload_utils.R` for the shared upload logic. The helpers support three common cases:
