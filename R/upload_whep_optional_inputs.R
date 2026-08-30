@@ -113,7 +113,7 @@ upload_whep_lpjml_grass_from_run <- function(
   run_dir = default_lpjml_grass_run_dir(),
   remote_path = default_whep_inputs_path(),
   years = NULL,
-  first_year = 1901L,
+  first_year = NULL,
   shares = lpjml_grass_access_shares(),
   artifact_dir = fs::path(tempdir(), "whep_lpjml_grass_artifacts")
 ) {
@@ -132,14 +132,58 @@ upload_whep_lpjml_grass_from_run <- function(
   invisible(paths)
 }
 
+# The calendar year of a run's first output step, decoded from the file's own
+# time axis instead of assumed.
+#
+# Every LPJmL output stamps its time axis as "days since YYYY-M-D" on a noleap
+# calendar. This used to default to 1901 in five places here, which silently
+# relabels every year of the 1750-2023 run by 151 -- with no error, and no
+# symptom in any pin, because the artifact still has a valid schema.
+#
+# Mirrors whep's own .lpjml_first_year(); duplicated here rather than
+# reaching into the package, because the grass readers below do their own
+# NetCDF arithmetic and must resolve the year before whep is loaded.
+lpjml_run_first_year <- function(run_dir, file = NULL) {
+  run_dir <- resolve_lpjml_output_dir(run_dir)
+  candidates <- c(file, "pft_npp.nc", "mswc.nc", "cftfrac.nc", "fpc.nc")
+  path <- NULL
+  for (f in candidates) {
+    if (!is.null(f) && fs::file_exists(fs::path(run_dir, f))) {
+      path <- fs::path(run_dir, f)
+      break
+    }
+  }
+  if (is.null(path)) {
+    cli::cli_abort("No LPJmL output in {.path {run_dir}} to read a year from.")
+  }
+  nc <- ncdf4::nc_open(path)
+  on.exit(ncdf4::nc_close(nc), add = TRUE)
+  units <- nc$dim[["time"]]$units %||% ""
+  # Parsed without regex escapes on purpose: this string has travelled
+  # through several layers of quoting and a mangled backslash here would
+  # fail open, not closed.
+  after <- sub("^.*since[ ]*", "", units)
+  ref <- sub("-.*$", "", after)
+  vals <- nc$dim[["time"]]$vals
+  if (!grepl("^[0-9]{3,4}$", ref)) {
+    cli::cli_abort(c(
+      "Cannot tell which year {.file {path}} starts in.",
+      i = "Its time axis carries no {.val since YYYY-} reference.",
+      i = "Pass {.arg first_year} explicitly."
+    ))
+  }
+  as.integer(ref) + as.integer(floor(vals[[1]] / 365))
+}
+
 prepare_whep_lpjml_grass_artifacts <- function(
   run_dir = default_lpjml_grass_run_dir(),
   years = NULL,
-  first_year = 1901L,
+  first_year = NULL,
   shares = lpjml_grass_access_shares(),
   artifact_dir = fs::path(tempdir(), "whep_lpjml_grass_artifacts")
 ) {
   run_dir <- resolve_lpjml_output_dir(run_dir)
+  first_year <- first_year %||% lpjml_run_first_year(run_dir)
   fs::dir_create(artifact_dir)
 
   cli::cli_alert_info("Preparing LPJmL grass availability from {.path {run_dir}}")
@@ -250,11 +294,12 @@ lpjml_grass_access_shares <- function(
 read_lpjml_managed_grass_availability <- function(
   run_dir = default_lpjml_grass_run_dir(),
   years = NULL,
-  first_year = 1901L,
+  first_year = NULL,
   shares = lpjml_grass_access_shares()
 ) {
   require_lpjml_reader_packages()
   run_dir <- resolve_lpjml_output_dir(run_dir)
+  first_year <- first_year %||% lpjml_run_first_year(run_dir, "pft_npp.nc")
 
   npp <- ncdf4::nc_open(fs::path(run_dir, "pft_npp.nc"))
   frac <- ncdf4::nc_open(fs::path(run_dir, "cftfrac.nc"))
@@ -314,10 +359,11 @@ read_lpjml_managed_grass_availability <- function(
 read_lpjml_natural_grass_productivity <- function(
   run_dir = default_lpjml_grass_run_dir(),
   years = NULL,
-  first_year = 1901L
+  first_year = NULL
 ) {
   require_lpjml_reader_packages()
   run_dir <- resolve_lpjml_output_dir(run_dir)
+  first_year <- first_year %||% lpjml_run_first_year(run_dir, "pft_npp.nc")
 
   npp <- ncdf4::nc_open(fs::path(run_dir, "pft_npp.nc"))
   on.exit(ncdf4::nc_close(npp), add = TRUE)

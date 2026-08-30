@@ -57,13 +57,14 @@ regenerate_whep_lpjml_pins <- function(
   whep_path = whep_source_path(),
   artifact_dir = fs::path(tempdir(), "whep_lpjml_pins"),
   years = NULL,
-  first_year = 1901L,
+  first_year = NULL,
   shares = lpjml_grass_access_shares(),
   compare = TRUE,
   upload = FALSE,
   remote_path = default_whep_inputs_path()
 ) {
   run_dir <- resolve_lpjml_output_dir(run_dir)
+  first_year <- first_year %||% lpjml_run_first_year(run_dir)
   fs::dir_create(artifact_dir)
   cli::cli_h1("Regenerating LPJmL-derived WHEP pins")
   cli::cli_alert_info("Run: {.path {run_dir}}")
@@ -263,7 +264,7 @@ build_lpjml_soc_hydrology_year <- function(whep, run_dir, year) {
 
 # Calendar years present in the run, read from the monthly time axis rather
 # than assumed, so a run with a different span chunks correctly.
-lpjml_hydrology_years <- function(run_dir, first_year = 1901L) {
+lpjml_hydrology_years <- function(run_dir, first_year = NULL) {
   path <- fs::path(run_dir, "mswc.nc")
   if (!fs::file_exists(path)) {
     cli::cli_abort("No {.file mswc.nc} in {.path {run_dir}}.")
@@ -271,6 +272,10 @@ lpjml_hydrology_years <- function(run_dir, first_year = 1901L) {
   nc <- ncdf4::nc_open(path)
   on.exit(ncdf4::nc_close(nc), add = TRUE)
   n_months <- nc$dim[["time"]]$len
+  # The COUNT was always read from the file; the START was assumed to be
+  # 1901, which on the 1750-2023 run yields 1901..2174 -- years the run
+  # does not contain.
+  first_year <- first_year %||% lpjml_run_first_year(run_dir, "mswc.nc")
   first_year + seq_len(n_months %/% 12L) - 1L
 }
 
