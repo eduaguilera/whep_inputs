@@ -31,6 +31,27 @@ Your username and password are needed to be able to upload files to the Nextclou
 
 The codes included here should both upload the raw inputs used (original data), just for transparency, and the cleaner format ones that will be used in the whep R package. You can see an example in `R/process_example.R`. I suggest creating new files for new related inputs, following the style of this one.
 
+## Do not source R/ wholesale
+
+`R/process_example.R` is a script, not a library: reading it publishes an
+`exampleeeeee` pin to both `Model inputs/world` and `Model inputs/raw_inputs`
+before continuing into a list of FAOSTAT re-uploads keyed to one machine's
+absolute paths. Every other file in `R/` defines functions only (their sole
+top-level statements are a `source()` of `upload_utils.R` and an `if (FALSE)`
+usage block), so this is the one to keep out of a loop:
+
+```r
+for (f in list.files("R", full.names = TRUE)) source(f)   # UPLOADS THINGS
+```
+
+Source what you need by name instead. `regenerate_whep_lpjml_pins()` needs
+`upload_utils.R`, `upload_whep_optional_inputs.R` (where
+`lpjml_run_first_year()` lives) and `regenerate_whep_lpjml_pins.R`.
+
+This bit a session on 2026-09-04, which published a stray pin version before
+the loop was narrowed. `update_pins_yaml()` merges into the remote index
+rather than replacing it, so nothing was lost, but the board carries the junk.
+
 ## Dependencies
 
 There is no `renv` here: the upload path needs `kwb.nextcloud` while the

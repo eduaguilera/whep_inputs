@@ -129,10 +129,7 @@ prepare_whep_lpjml_soc_artifacts <- function(
   whep <- load_whep_namespace(whep_path)
 
   cli::cli_alert_info("Preparing LPJmL grass/natural net carbon")
-  # .gn_net_c_from_lpjml() IS the documented pin seam: its output schema is the
-  # artifact's schema, so calling it here keeps one definition of the layer.
-  net_c <- whep$.gn_net_c_from_lpjml(list(), years, run_dir) |>
-    tibble::as_tibble()
+  net_c <- build_lpjml_net_carbon(whep, run_dir, years)
   net_c_path <- unname(save_processed_tibble(
     net_c,
     "lpjml-grass-natural-net-c",
@@ -155,6 +152,46 @@ prepare_whep_lpjml_soc_artifacts <- function(
     "lpjml-grass-natural-net-c" = net_c_path,
     "lpjml-soc-hydrology" = hydrology_path
   )
+}
+
+# .gn_net_c_from_lpjml() IS the documented pin seam: its output schema is the
+# artifact's schema, so calling it here keeps one definition of the layer.
+#
+# BUILT IN YEAR BLOCKS, for the same reason build_lpjml_soc_hydrology() is.
+# The seam keeps 16 of pft_npp's 43 bands, but reads them all: over the whole
+# 1750-2023 span that is ~8e8 long rows before the PFT filter. Observed 59 GB
+# resident and still climbing on a 128 GB machine carrying other jobs, which
+# is how this came to be chunked. The seam is per cell-year, so the blocks
+# concatenate and the artifact is identical; peak stays near 2 GB and the
+# whole span takes about 47 minutes.
+# The years pft_npp.nc actually holds. Read from THAT file rather than from
+# mswc.nc, which lpjml_hydrology_years() uses: the two agree on this run but a
+# run whose carbon and water outputs cover different spans would otherwise be
+# blocked over the wrong axis, and silently, since every block would still
+# return rows.
+lpjml_net_carbon_years <- function(run_dir) {
+  path <- fs::path(run_dir, "pft_npp.nc")
+  if (!fs::file_exists(path)) {
+    cli::cli_abort("No {.file pft_npp.nc} in {.path {run_dir}}.")
+  }
+  nc <- ncdf4::nc_open(path)
+  on.exit(ncdf4::nc_close(nc), add = TRUE)
+  n_years <- nc$dim[["time"]]$len
+  lpjml_run_first_year(run_dir, "pft_npp.nc") + seq_len(n_years) - 1L
+}
+
+build_lpjml_net_carbon <- function(whep, run_dir, years, block = 5L) {
+  years <- years %||% lpjml_net_carbon_years(run_dir)
+  blocks <- split(years, ceiling(seq_along(years) / block))
+  cli::cli_alert_info(
+    "Net carbon: {length(years)} year{?s} in {length(blocks)} block{?s}"
+  )
+  parts <- purrr::map(blocks, function(yrs) {
+    out <- tibble::as_tibble(whep$.gn_net_c_from_lpjml(list(), yrs, run_dir))
+    invisible(gc(verbose = FALSE))
+    out
+  })
+  dplyr::bind_rows(parts)
 }
 
 # The hydrology artifact is the only one of the four with no single reader
