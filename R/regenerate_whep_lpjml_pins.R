@@ -4,13 +4,17 @@
 #
 # WHY ONE ENTRY POINT
 #
-# There are exactly four such pins, produced by two different generators that
-# used to be invoked separately:
+# There are exactly five such pins, produced by three generators that used to
+# be invoked separately:
 #
 #   lpjml-grass-availability     read by R/feed_lpjml.R
 #   lpjml-grass-productivity     read by R/feed_lpjml.R
 #   lpjml-grass-natural-net-c    read by R/grass_natural_carbon_inputs.R
 #   lpjml-soc-hydrology          read by R/water_balance.R
+#   lpjml-crop-irrig-depth       read by R/lpjml_irrig_depth.R (the annual
+#                                irrigation applied to each crop's irrigated
+#                                and rainfed stand, the irrigation term of
+#                                WHEP's IPCC wet/dry climate classification)
 #
 # They must be regenerated TOGETHER, from ONE run. Each one carries the same
 # model's carbon and water, so refreshing a subset leaves WHEP mixing two LPJmL
@@ -33,7 +37,7 @@
 #
 # UPLOAD IS OPT-IN
 #
-# Default is generate-and-report only. These four pins are the default source
+# Default is generate-and-report only. These five pins are the default source
 # for every WHEP user who never runs LPJmL, so replacing them changes core
 # carbon and water inputs for everyone and is not easily reversed. Inspect the
 # manifest and the comparison first, then re-call with `upload = TRUE`.
@@ -45,13 +49,13 @@
 #' @param whep_path Path to the WHEP package source. The soil-carbon and
 #'   hydrology artifacts are built with WHEP's own readers, so their definition
 #'   lives in exactly one place rather than being restated here.
-#' @param artifact_dir Where to write the four parquet files.
+#' @param artifact_dir Where to write the five parquet files.
 #' @param years Optional year subset. `NULL` (default) does the whole run, which
 #'   is what a pin needs -- pass a subset only for a smoke test.
 #' @param compare If `TRUE`, report how each artifact differs from the pin it
 #'   would replace. This is the point of the dry run, so it defaults on.
-#' @param upload If `TRUE`, upload all four. Defaults to `FALSE`.
-#' @return A named character vector of the four local paths, invisibly.
+#' @param upload If `TRUE`, upload all five. Defaults to `FALSE`.
+#' @return A named character vector of the five local paths, invisibly.
 regenerate_whep_lpjml_pins <- function(
   run_dir = default_lpjml_grass_run_dir(),
   whep_path = whep_source_path(),
@@ -82,7 +86,13 @@ regenerate_whep_lpjml_pins <- function(
     years = years,
     artifact_dir = artifact_dir
   )
-  paths <- c(grass, soc)
+  irrig <- prepare_whep_lpjml_irrig_depth_artifacts(
+    run_dir = run_dir,
+    whep_path = whep_path,
+    years = years,
+    artifact_dir = artifact_dir
+  )
+  paths <- c(grass, soc, irrig)
 
   report_lpjml_pin_manifest(paths)
   if (isTRUE(compare)) {
@@ -152,6 +162,68 @@ prepare_whep_lpjml_soc_artifacts <- function(
     "lpjml-grass-natural-net-c" = net_c_path,
     "lpjml-soc-hydrology" = hydrology_path
   )
+}
+
+#' Build the crop irrigation-depth artifact from a finished run.
+#'
+#' The annual irrigation LPJmL applied to each crop's irrigated and rainfed
+#' stand (mm per square metre of that stand), per cell, LPJmL crop and year,
+#' with both stand fractions and the run's vintage (model version, git hash,
+#' run name and start time), from WHEP's own reader at the crop grain
+#' (`.lid_crop_depth()`, "others" stand included), so the pinned and
+#' run-derived paths cannot drift apart. WHEP maps it to items and water
+#' regimes on read. It needs a run that writes `cft_airrig_month.nc` (LPJmL
+#' runs from 2026-08-31 on); WHEP's reader refuses an older one. Only 1850
+#' onward is kept: WHEP's series start there.
+prepare_whep_lpjml_irrig_depth_artifacts <- function(
+  run_dir = default_lpjml_grass_run_dir(),
+  whep_path = whep_source_path(),
+  years = NULL,
+  artifact_dir = fs::path(tempdir(), "whep_lpjml_pins")
+) {
+  run_dir <- resolve_lpjml_output_dir(run_dir)
+  fs::dir_create(artifact_dir)
+  whep <- load_whep_namespace(whep_path)
+  cli::cli_alert_info("Preparing LPJmL crop irrigation depth")
+  irrig <- build_lpjml_crop_irrig_depth(whep, run_dir, years)
+  path <- unname(save_processed_tibble(
+    irrig,
+    "lpjml-crop-irrig-depth",
+    year_col = "year",
+    formats = "parquet",
+    out_dir = artifact_dir
+  )[[1]])
+  c("lpjml-crop-irrig-depth" = path)
+}
+
+# One year at a time, each spilled to disk, for the same reason as
+# build_lpjml_soc_hydrology(): a year of cft_airrig_month alone is 7.7e7
+# long-form band-cell-months, and R does not return the transient heap to the
+# OS.
+build_lpjml_crop_irrig_depth <- function(whep, run_dir, years) {
+  years <- years %||% whep$.lid_run_years(run_dir)
+  years <- years[years >= 1850L]
+  cli::cli_alert_info(
+    "Crop irrigation depth: {length(years)} years, one at a time"
+  )
+  spill <- fs::path(tempdir(), "crop_irrig_depth_years")
+  fs::dir_create(spill)
+  on.exit(fs::dir_delete(spill), add = TRUE)
+  for (i in seq_along(years)) {
+    if (i %% 25L == 0L) {
+      cli::cli_alert_info("  ...{years[[i]]} ({i}/{length(years)})")
+    }
+    part <- whep$.lid_crop_depth(years = years[[i]], run_dir = run_dir)
+    nanoparquet::write_parquet(
+      part,
+      fs::path(spill, paste0(years[[i]], ".parquet"))
+    )
+    rm(part)
+    invisible(gc(verbose = FALSE))
+  }
+  files <- fs::dir_ls(spill, glob = "*.parquet")
+  data.table::rbindlist(lapply(files, nanoparquet::read_parquet)) |>
+    tibble::as_tibble()
 }
 
 # .gn_net_c_from_lpjml() IS the documented pin seam: its output schema is the
