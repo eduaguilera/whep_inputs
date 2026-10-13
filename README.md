@@ -164,3 +164,31 @@ This uploads:
 
 - `lpjml-grass-availability`
 - `lpjml-grass-productivity`
+
+## Derived HWSD grids
+
+The whep package reads four grids derived from the Harmonized World Soil
+Database (HWSD) v1.2 from pins instead of aggregating the 11 GB raster itself,
+so every user shares one vintage: `hwsd-texture-class-grid`, `hwsd-clay-grid`,
+`hwsd-drainage-class-grid` and `hwsd-texture-fao-grid`
+(`whep_hwsd_grid_aliases()`).
+
+whep builds them (`inst/scripts/prepare_hwsd_grids.R` in the whep package) and
+writes the Parquet files together with `hwsd-grids-manifest.csv`, which records
+each file's row count and md5. The upload helper compares the files with the
+manifest and aborts on any difference before it publishes a pin version:
+
+```r
+source("R/upload_whep_optional_inputs.R")
+
+check_whep_hwsd_grid_artifacts("~/path/to/hwsd_grid_dir")
+
+# All four grids, or a subset:
+upload_whep_hwsd_grid_artifacts(
+  "~/path/to/hwsd_grid_dir",
+  aliases = c("hwsd-drainage-class-grid", "hwsd-texture-fao-grid")
+)
+```
+
+Then read each new version from the board and register it in whep's
+`inst/extdata/whep_inputs.csv`.

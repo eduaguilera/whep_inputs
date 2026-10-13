@@ -259,6 +259,117 @@ upload_whep_lpjml_soc_artifacts <- function(
   invisible(paths)
 }
 
+# The derived-HWSD grids. The whep package's builder
+# (`inst/scripts/prepare_hwsd_grids.R`) writes one Parquet file per grid and,
+# beside them, `hwsd-grids-manifest.csv`: each file's row count, size and md5
+# with the HWSD version and topsoil depth it was built from. The grids hold
+# per-class pixel counts (or the clay percentage), never the coefficients
+# derived from them, so pinning them freezes nothing the package can still
+# revise.
+whep_hwsd_grid_aliases <- function() {
+  c(
+    "hwsd-texture-class-grid",
+    "hwsd-clay-grid",
+    "hwsd-drainage-class-grid",
+    "hwsd-texture-fao-grid"
+  )
+}
+
+# Compare each grid file with the row count and md5 its builder recorded, so a
+# truncated or substituted file is never published as a pin version. Aborts on
+# any difference, and on a manifest that does not list a requested grid.
+check_whep_hwsd_grid_artifacts <- function(
+  grid_dir,
+  aliases = whep_hwsd_grid_aliases()
+) {
+  aliases <- match.arg(aliases, whep_hwsd_grid_aliases(), several.ok = TRUE)
+  grid_dir <- fs::path_expand(grid_dir)
+  manifest_path <- fs::path(grid_dir, "hwsd-grids-manifest.csv")
+  validate_input_paths(manifest_path, allow_dirs = FALSE)
+
+  # Read every column as text: an md5 made only of digits and one "e" would
+  # otherwise be parsed as a number.
+  manifest <- readr::read_csv(
+    manifest_path,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+  absent <- setdiff(aliases, manifest$alias)
+  if (length(absent) > 0) {
+    cli::cli_abort(c(
+      "The manifest lists no entry for {length(absent)} grid{?s}:",
+      "x" = "{absent}"
+    ))
+  }
+
+  checked <- manifest |>
+    dplyr::filter(alias %in% aliases) |>
+    dplyr::mutate(path = as.character(fs::path(grid_dir, file)))
+  validate_input_paths(checked$path, allow_dirs = FALSE)
+
+  # A missing manifest value is a mismatch, not a pass. The rows of a file
+  # whose md5 differs are not read: it may not be a readable Parquet file.
+  checked <- checked |>
+    dplyr::mutate(
+      md5_found = unname(tools::md5sum(path)),
+      md5_match = dplyr::coalesce(md5_found == md5, FALSE),
+      rows_found = purrr::map2_int(
+        path,
+        md5_match,
+        \(p, ok) {
+          if (ok) nrow(arrow::read_parquet(p, col_select = 1L)) else NA_integer_
+        }
+      ),
+      rows_match = dplyr::coalesce(rows_found == as.integer(rows), FALSE)
+    )
+
+  bad <- dplyr::filter(checked, !(md5_match & rows_match))
+  if (nrow(bad) > 0) {
+    problems <- dplyr::if_else(
+      bad$md5_match,
+      paste0(
+        bad$alias, ": ", bad$rows_found, " rows against ", bad$rows,
+        " in the manifest."
+      ),
+      paste0(
+        bad$alias, ": md5 ", bad$md5_found, " against ", bad$md5,
+        " in the manifest."
+      )
+    )
+    cli::cli_abort(c(
+      "The manifest does not match {nrow(bad)} grid file{?s}:",
+      stats::setNames(problems, rep("x", length(problems)))
+    ))
+  }
+
+  cli::cli_alert_success(
+    "{nrow(checked)} HWSD grid file{?s} match{?es/} the manifest."
+  )
+  dplyr::select(checked, alias, path)
+}
+
+# One pin per grid, uploaded as the Parquet file the builder wrote, so the
+# package downloads exactly that file. Read the new version of each alias from
+# the board afterwards and register it in whep's inst/extdata/whep_inputs.csv.
+upload_whep_hwsd_grid_artifacts <- function(
+  grid_dir,
+  aliases = whep_hwsd_grid_aliases(),
+  remote_path = default_whep_inputs_path()
+) {
+  checked <- check_whep_hwsd_grid_artifacts(grid_dir, aliases)
+
+  purrr::pwalk(
+    checked,
+    function(alias, path) {
+      cli::cli_alert_info(
+        "Uploading {.val {alias}} ({round(fs::file_size(path) / 1024^2, 2)} MB)"
+      )
+      upload_input(path, alias, remote_path = remote_path, type = "files")
+    }
+  )
+
+  invisible(checked)
+}
+
 resolve_lpjml_output_dir <- function(run_dir) {
   if (is.null(run_dir) || is.na(run_dir) || !nzchar(run_dir)) {
     cli::cli_abort(c(
@@ -505,4 +616,8 @@ if (FALSE) {
     availability_path = "~/path/to/lpjml_grass_availability.parquet",
     productivity_path = "~/path/to/lpjml_grass_productivity.parquet"
   )
+
+  # Build the grids with whep's inst/scripts/prepare_hwsd_grids.R first.
+  check_whep_hwsd_grid_artifacts("~/path/to/hwsd_grid_dir")
+  upload_whep_hwsd_grid_artifacts("~/path/to/hwsd_grid_dir")
 }
