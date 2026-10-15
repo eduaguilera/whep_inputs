@@ -4,13 +4,16 @@
 #
 # WHY ONE ENTRY POINT
 #
-# There are exactly four such pins, produced by two different generators that
-# used to be invoked separately:
+# There are exactly five such pins, produced by three generators that used to
+# be invoked separately:
 #
 #   lpjml-grass-availability     read by R/feed_lpjml.R
 #   lpjml-grass-productivity     read by R/feed_lpjml.R
 #   lpjml-grass-natural-net-c    read by R/grass_natural_carbon_inputs.R
 #   lpjml-soc-hydrology          read by R/water_balance.R
+#   lpjml-seepage                read by R/lpjml_hydrology.R (annual deep
+#                                seepage, the drainage_mm that drives the
+#                                nitrogen balance's leaching, whep#1528)
 #
 # They must be regenerated TOGETHER, from ONE run. Each one carries the same
 # model's carbon and water, so refreshing a subset leaves WHEP mixing two LPJmL
@@ -33,7 +36,7 @@
 #
 # UPLOAD IS OPT-IN
 #
-# Default is generate-and-report only. These four pins are the default source
+# Default is generate-and-report only. These five pins are the default source
 # for every WHEP user who never runs LPJmL, so replacing them changes core
 # carbon and water inputs for everyone and is not easily reversed. Inspect the
 # manifest and the comparison first, then re-call with `upload = TRUE`.
@@ -45,13 +48,13 @@
 #' @param whep_path Path to the WHEP package source. The soil-carbon and
 #'   hydrology artifacts are built with WHEP's own readers, so their definition
 #'   lives in exactly one place rather than being restated here.
-#' @param artifact_dir Where to write the four parquet files.
+#' @param artifact_dir Where to write the five parquet files.
 #' @param years Optional year subset. `NULL` (default) does the whole run, which
 #'   is what a pin needs -- pass a subset only for a smoke test.
 #' @param compare If `TRUE`, report how each artifact differs from the pin it
 #'   would replace. This is the point of the dry run, so it defaults on.
-#' @param upload If `TRUE`, upload all four. Defaults to `FALSE`.
-#' @return A named character vector of the four local paths, invisibly.
+#' @param upload If `TRUE`, upload all five. Defaults to `FALSE`.
+#' @return A named character vector of the five local paths, invisibly.
 regenerate_whep_lpjml_pins <- function(
   run_dir = default_lpjml_grass_run_dir(),
   whep_path = whep_source_path(),
@@ -82,7 +85,13 @@ regenerate_whep_lpjml_pins <- function(
     years = years,
     artifact_dir = artifact_dir
   )
-  paths <- c(grass, soc)
+  seepage <- prepare_whep_lpjml_seepage_artifacts(
+    run_dir = run_dir,
+    whep_path = whep_path,
+    years = years,
+    artifact_dir = artifact_dir
+  )
+  paths <- c(grass, soc, seepage)
 
   report_lpjml_pin_manifest(paths)
   if (isTRUE(compare)) {
@@ -192,6 +201,75 @@ build_lpjml_net_carbon <- function(whep, run_dir, years, block = 5L) {
     out
   })
   dplyr::bind_rows(parts)
+}
+
+#' Build the annual deep-seepage artifact from a finished run.
+#'
+#' Annual LPJmL deep seepage (`mseepage.nc`, mm per year, the twelve months
+#' summed) per land cell and year, with the run's vintage (model version, git
+#' hash, run name and start time), from WHEP's own pin seam
+#' (`.hydro_seepage_layer()`), so the pinned and run-derived values cannot
+#' drift apart. Seepage is a whole-cell quantity: LPJmL has no per-crop
+#' seepage. Only 1850 onward is kept: WHEP's series start there.
+prepare_whep_lpjml_seepage_artifacts <- function(
+  run_dir = default_lpjml_grass_run_dir(),
+  whep_path = whep_source_path(),
+  years = NULL,
+  artifact_dir = fs::path(tempdir(), "whep_lpjml_pins")
+) {
+  run_dir <- resolve_lpjml_output_dir(run_dir)
+  fs::dir_create(artifact_dir)
+  whep <- load_whep_namespace(whep_path)
+  cli::cli_alert_info("Preparing LPJmL deep seepage")
+  seepage <- build_lpjml_seepage(whep, run_dir, years)
+  path <- unname(save_processed_tibble(
+    seepage,
+    "lpjml-seepage",
+    year_col = "year",
+    formats = "parquet",
+    out_dir = artifact_dir
+  )[[1]])
+  c("lpjml-seepage" = path)
+}
+
+# One year at a time, each spilled to disk, for the same reason as
+# build_lpjml_soc_hydrology(): R does not return the transient heap of the
+# monthly cube (2.4e6 cell-months a year) to the OS.
+build_lpjml_seepage <- function(whep, run_dir, years) {
+  years <- years %||% lpjml_seepage_years(run_dir)
+  years <- years[years >= 1850L]
+  cli::cli_alert_info("Deep seepage: {length(years)} years, one at a time")
+  spill <- fs::path(tempdir(), "seepage_years")
+  fs::dir_create(spill)
+  on.exit(fs::dir_delete(spill), add = TRUE)
+  for (i in seq_along(years)) {
+    if (i %% 25L == 0L) {
+      cli::cli_alert_info("  ...{years[[i]]} ({i}/{length(years)})")
+    }
+    part <- whep$.hydro_seepage_layer(run_dir, years = years[[i]])
+    nanoparquet::write_parquet(
+      part,
+      fs::path(spill, paste0(years[[i]], ".parquet"))
+    )
+    rm(part)
+    invisible(gc(verbose = FALSE))
+  }
+  files <- fs::dir_ls(spill, glob = "*.parquet")
+  data.table::rbindlist(lapply(files, nanoparquet::read_parquet)) |>
+    tibble::as_tibble()
+}
+
+# Calendar years in mseepage.nc, from its own dated time axis, never assumed:
+# the reference run starts in 1750, not 1901.
+lpjml_seepage_years <- function(run_dir) {
+  path <- fs::path(run_dir, "mseepage.nc")
+  if (!fs::file_exists(path)) {
+    cli::cli_abort("No {.file mseepage.nc} in {.path {run_dir}}.")
+  }
+  nc <- ncdf4::nc_open(path)
+  on.exit(ncdf4::nc_close(nc), add = TRUE)
+  first_year <- lpjml_run_first_year(run_dir, "mseepage.nc")
+  first_year + seq_len(nc$dim[["time"]]$len %/% 12L) - 1L
 }
 
 # The hydrology artifact is the only one of the four with no single reader
@@ -465,6 +543,10 @@ lpjml_pin_compare_specs <- function() {
     "lpjml-soc-hydrology" = list(
       key = c("lon", "lat", "year", "month"),
       value = "swc_topsoil"
+    ),
+    "lpjml-seepage" = list(
+      key = c("lon", "lat", "year"),
+      value = "seepage_mm"
     )
   )
 }
