@@ -114,6 +114,46 @@ upload_input("~/data/raw_directory", "some-archived-directory")
 
 Parquet files are treated as prepared files by default, not reprocessed tabular inputs. This matters for generated WHEP runtime artifacts such as `country_grid.parquet`: the package should download the exact file it expects. If you deliberately want to normalize a Parquet table into the tabular CSV plus Parquet pin layout, call `upload_input(..., type = "tabular")`.
 
+## Regenerate the complete LPJmL output family
+
+Use `regenerate_whep_lpjml_pins()` for a coordinated refresh of all seven
+currently consumed model-output artifacts: grass availability, grass
+productivity, grass/natural net carbon, SOC hydrology, crop regime yield,
+crop irrigation depth and annual deep seepage. The six wind/radiation forcing
+pins are deliberately excluded.
+
+```r
+source("R/upload_whep_optional_inputs.R")
+source("R/regenerate_whep_lpjml_pins.R")
+paths <- regenerate_whep_lpjml_pins(
+  run_dir = Sys.getenv("WHEP_LPJML_RUN_DIR"),
+  years = 2010L, # bounded smoke test; NULL means the complete common run
+  upload = FALSE
+)
+```
+
+Before generation, every consumed NetCDF must identify the same simulation
+(`source`, `GIT_hash`, `history`) and cover the requested years. The complete
+local family is checked again before comparison or any upload: missing,
+empty, malformed, wrong-year or conflicting-vintage members abort. The
+`lpjml-family-manifest.csv` records all seven files, their actual year sets,
+input cohort and checksums; it is also attached to the returned paths as
+`lpjml_manifest`. Existing producer definitions remain in WHEP.
+
+Explicit requested years, including sparse or pre-1850 years, are retained.
+The shared entry point resolves its whole-run default once for every member.
+The three standalone crop/seepage helper defaults retain their documented
+1850-onward period when `years = NULL`; that default never filters an explicit
+request. Upload is opt-in and must follow separate numerical validation.
+
+For the offline regressions, install `testthat` and `withr` in addition to
+the generator dependencies above. Run the tiny-NetCDF and artifact-fixture
+tests from this root:
+
+```r
+testthat::test_file("tests/test_lpjml_regeneration.R", stop_on_failure = TRUE)
+```
+
 ## WHEP LPJmL-optional inputs
 
 The WHEP branch that makes LPJmL optional expects generated spatialization and LPJmL grass artifacts to exist as pins. The helper in `R/upload_whep_optional_inputs.R` uploads the known spatialization Parquet files from the default local preparation directory:
