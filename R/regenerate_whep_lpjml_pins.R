@@ -776,29 +776,63 @@ lpjml_pin_file_cohort <- function(path, steps) {
     as.character(value)
   })
   names(vintage) <- c("source", "GIT_hash", "history")
+  list(vintage = vintage, years = lpjml_pin_axis_years(nc, path, steps))
+}
+
+# Current readers index regular noleap day axes from a January-1 origin.
+# CF defines noleap/365_day with the usual month lengths and no February 29:
+# https://cfconventions.org/Data/cf-conventions/cf-conventions-1.10/cf-conventions.html
+lpjml_pin_axis_years <- function(nc, path, steps) {
   time <- nc$dim[["time"]]
-  units <- time$units %||% ""
-  ref <- sub("-.*$", "", sub("^.*since[ ]*", "", units))
-  values <- time$vals
+  units <- trimws(time$units %||% "")
+  origin <- regmatches(
+    units,
+    regexec(
+      "^days since ([0-9]{3,4})-0?1-0?1([ T]0{1,2}:0{1,2}:0{1,2}([.]0+)?)?$",
+      units
+    )
+  )[[1L]]
+  calendar <- tolower(ncdf4::ncatt_get(nc, "time", "calendar")$value)
   if (
-    !grepl("^[0-9]{3,4}$", ref) ||
-      length(values) == 0L ||
-      any(!is.finite(values)) ||
-      anyDuplicated(values)
+    length(origin) == 0L ||
+      !calendar %in% c("noleap", "365_day")
   ) {
     cli::cli_abort(
-      "{.file {path}} has no complete dated time axis.",
+      "{.file {path}} needs a noleap day axis from January 1 at midnight.",
       class = "lpjml_cohort_years"
     )
   }
-  years <- as.integer(ref) + as.integer(floor(values / 365))
-  if (any(table(years) != steps)) {
+  values <- time$vals
+  if (
+    length(values) == 0L || any(!is.finite(values)) || any(diff(values) <= 0)
+  ) {
     cli::cli_abort(
-      "{.file {path}} has an incomplete annual time axis.",
+      "{.file {path}} needs a strictly increasing dated time axis.",
       class = "lpjml_cohort_years"
     )
   }
-  list(vintage = vintage, years = sort(unique(years)))
+  years <- as.integer(origin[[2L]]) + as.integer(floor(values / 365))
+  native <- unique(years)
+  if (any(diff(native) != 1L) || any(table(years) != steps)) {
+    cli::cli_abort(
+      "{.file {path}} has discontinuous or incomplete native years.",
+      class = "lpjml_cohort_years"
+    )
+  }
+  if (steps == 12L) {
+    month_starts <- c(
+      0,
+      cumsum(c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31))
+    )
+    month <- findInterval(values %% 365, month_starts)
+    if (anyDuplicated(paste(years, month))) {
+      cli::cli_abort(
+        "{.file {path}} needs one timestamp in each native calendar month.",
+        class = "lpjml_cohort_years"
+      )
+    }
+  }
+  native
 }
 
 lpjml_pin_cohort <- function(
@@ -813,6 +847,13 @@ lpjml_pin_cohort <- function(
     lpjml_pin_file_cohort(fs::path(run_dir, file), steps)
   })
   native_start <- min(headers[["pft_npp.nc"]]$years)
+  native_starts <- vapply(headers, function(h) min(h$years), integer(1))
+  if (any(native_starts != native_start)) {
+    cli::cli_abort(
+      "LPJmL family inputs have inconsistent native first years.",
+      class = "lpjml_cohort_years"
+    )
+  }
   if (
     !is.null(first_year) && !identical(as.integer(first_year), native_start)
   ) {
@@ -882,6 +923,13 @@ lpjml_pin_cohort <- function(
 # every requested year and the input cohort's vintage where rows carry it.
 validate_lpjml_pin_family <- function(paths, cohort) {
   specs <- lpjml_pin_compare_specs()
+  consumer_columns <- lpjml_pin_consumer_columns()
+  if (!setequal(names(specs), names(consumer_columns))) {
+    cli::cli_abort(
+      "Every LPJmL output needs its complete consumer schema contract.",
+      class = "lpjml_family_schema"
+    )
+  }
   if (
     is.null(names(paths)) ||
       anyDuplicated(names(paths)) ||
@@ -911,10 +959,20 @@ validate_lpjml_pin_family <- function(paths, cohort) {
         class = "lpjml_family_coverage"
       )
     }
-    required <- c(specs[[pin]]$key, specs[[pin]]$value)
+    required <- c(specs[[pin]]$key, specs[[pin]]$value, consumer_columns[[pin]])
     if (!all(rlang::has_name(d, required))) {
       cli::cli_abort(
         "{.val {pin}} lacks its consumer key/value schema.",
+        class = "lpjml_family_schema"
+      )
+    }
+    if (
+      pin == "lpjml-grass-natural-net-c" &&
+        any(d$land_use == "grassland", na.rm = TRUE) &&
+        !rlang::has_name(d, "net_c_mgc_ha_yr")
+    ) {
+      cli::cli_abort(
+        "{.val {pin}} lacks the grassland net-carbon field.",
         class = "lpjml_family_schema"
       )
     }
@@ -952,4 +1010,32 @@ validate_lpjml_pin_family <- function(paths, cohort) {
     )
   })
   dplyr::bind_rows(rows)
+}
+
+# Full consumer requirements, separate from the one-value comparison summary.
+# Contracts: WHEP feed_lpjml.R, grass_natural_carbon_inputs.R, water_balance.R,
+# and the crop-grain prototypes in lpjml_regime_yield.R/lpjml_irrig_depth.R.
+# Natural litterfall/woody-share fields remain optional as in WHEP's reader;
+# net_c_mgc_ha_yr is required specifically when grassland rows are supplied.
+lpjml_pin_consumer_columns <- function() {
+  list(
+    "lpjml-grass-availability" = "grass_avail_dm_t_ha",
+    "lpjml-grass-productivity" = "grass_npp",
+    "lpjml-grass-natural-net-c" = "npp_c_mgc_ha_yr",
+    "lpjml-soc-hydrology" = c("swc_topsoil", "prec_mm", "irrig_mm"),
+    "lpjml-crop-regime-yield" = c(
+      "yield_rainfed",
+      "yield_irrigated",
+      "stand_frac_rainfed",
+      "stand_frac_irrigated",
+      "method_regime_yield"
+    ),
+    "lpjml-crop-irrig-depth" = c(
+      "irrig_mm_irrigated",
+      "irrig_mm_rainfed",
+      "stand_frac_irrigated",
+      "stand_frac_rainfed"
+    ),
+    "lpjml-seepage" = "seepage_mm"
+  )
 }

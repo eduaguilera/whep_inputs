@@ -50,7 +50,12 @@ make_run_fixture <- function(years = 2010:2011, changed = NULL) {
   for (file in names(steps)) {
     yy <- if (identical(file, changed)) tail(years, 1L) else years
     time <- unlist(lapply(yy, function(y) {
-      (y - min(years)) * 365 + seq_len(steps[[file]]) * 365 / steps[[file]] - 1
+      offset <- if (steps[[file]] == 12L) {
+        c(15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349)
+      } else {
+        182
+      }
+      (y - min(years)) * 365 + offset
     }))
     dim <- ncdf4::ncdim_def(
       "time",
@@ -59,6 +64,7 @@ make_run_fixture <- function(years = 2010:2011, changed = NULL) {
     )
     var <- ncdf4::ncvar_def("value", "1", list(dim), -9999)
     nc <- ncdf4::nc_create(file.path(run, file), var)
+    ncdf4::ncatt_put(nc, "time", "calendar", "noleap")
     ncdf4::ncatt_put(nc, 0, "source", "LPJmL test version")
     ncdf4::ncatt_put(nc, 0, "GIT_hash", "test-revision")
     ncdf4::ncatt_put(nc, 0, "history", "Mon Aug 31 14:13:10 2026: lpjml")
@@ -66,6 +72,30 @@ make_run_fixture <- function(years = 2010:2011, changed = NULL) {
   }
   run
 }
+
+# Independent fixture schemas from WHEP3201ad1e: feed_lpjml.R normalisers,
+# grass_natural_carbon_inputs.R grassland guard, water_balance.R hydrology,
+# and the crop-grain prototypes in lpjml_regime_yield.R/lpjml_irrig_depth.R.
+consumer_fixture_columns <- list(
+  "lpjml-grass-availability" = c("grass_avail_dm_t_ha"),
+  "lpjml-grass-productivity" = c("grass_npp"),
+  "lpjml-grass-natural-net-c" = c("npp_c_mgc_ha_yr", "net_c_mgc_ha_yr"),
+  "lpjml-soc-hydrology" = c("swc_topsoil", "prec_mm", "irrig_mm"),
+  "lpjml-crop-regime-yield" = c(
+    "yield_rainfed",
+    "yield_irrigated",
+    "stand_frac_rainfed",
+    "stand_frac_irrigated",
+    "method_regime_yield"
+  ),
+  "lpjml-crop-irrig-depth" = c(
+    "irrig_mm_irrigated",
+    "irrig_mm_rainfed",
+    "stand_frac_irrigated",
+    "stand_frac_rainfed"
+  ),
+  "lpjml-seepage" = "seepage_mm"
+)
 
 make_family_fixture <- function(cohort) {
   out <- tempfile("lpjml-family-")
@@ -79,7 +109,19 @@ make_family_fixture <- function(cohort) {
       for (key in setdiff(spec$key, "year")) {
         d[[key]] <- 1L
       }
-      d[[spec$value]] <- seq_along(cohort$years)
+      for (column in consumer_fixture_columns[[pin]]) {
+        d[[column]] <- if (column == "method_regime_yield") {
+          "fixture_method"
+        } else {
+          seq_along(cohort$years)
+        }
+      }
+      if ("land_use" %in% names(d)) {
+        d$land_use <- "grassland"
+      }
+      if ("lpjml_crop" %in% names(d)) {
+        d$lpjml_crop <- "maize"
+      }
       if (pin %in% c("lpjml-crop-irrig-depth", "lpjml-seepage")) {
         for (key in names(cohort$vintage)) {
           d[[key]] <- cohort$vintage[[key]]
@@ -335,4 +377,84 @@ testthat::test_that("missing provenance and inputs cannot become a partial cohor
       class = "lpjml_cohort_years"
     )
   }
+})
+
+testthat::test_that("axis units, calendar, order and native continuity are checked", {
+  for (change in list(
+    c("units", "hours since 2010-01-01"),
+    c("units", "days since 2010-02-01"),
+    c("calendar", "gregorian"),
+    c("calendar", "360_day"),
+    c("calendar", "")
+  )) {
+    run <- make_run_fixture()
+    nc <- ncdf4::nc_open(file.path(run, "mseepage.nc"), write = TRUE)
+    ncdf4::ncatt_put(nc, "time", change[[1L]], change[[2L]])
+    ncdf4::nc_close(nc)
+    testthat::expect_error(
+      regeneration_env$lpjml_pin_cohort(run, 2010L),
+      class = "lpjml_cohort_years"
+    )
+  }
+  run <- make_run_fixture()
+  nc <- ncdf4::nc_open(file.path(run, "pft_npp.nc"), write = TRUE)
+  ncdf4::ncvar_put(nc, "time", rev(nc$dim$time$vals))
+  ncdf4::nc_close(nc)
+  testthat::expect_error(
+    regeneration_env$lpjml_pin_cohort(run, 2010:2011),
+    class = "lpjml_cohort_years"
+  )
+  shared_gap <- make_run_fixture(c(2010L, 2012L))
+  testthat::expect_error(
+    regeneration_env$lpjml_pin_cohort(shared_gap, c(2010L, 2012L)),
+    class = "lpjml_cohort_years"
+  )
+  run <- make_run_fixture()
+  nc <- ncdf4::nc_open(file.path(run, "mseepage.nc"), write = TRUE)
+  vals <- nc$dim$time$vals
+  vals[[2L]] <- 20 # Twelve unique samples, but January twice and no February.
+  ncdf4::ncvar_put(nc, "time", vals)
+  ncdf4::nc_close(nc)
+  testthat::expect_error(
+    regeneration_env$lpjml_pin_cohort(run, 2010:2011),
+    class = "lpjml_cohort_years"
+  )
+  later_start <- make_run_fixture(changed = "cft_airrig_month.nc")
+  testthat::expect_error(
+    regeneration_env$lpjml_pin_cohort(later_start, 2011L),
+    class = "lpjml_cohort_years"
+  )
+})
+
+testthat::test_that("every non-key consumer field is required before upload", {
+  cohort <- regeneration_env$lpjml_pin_cohort(make_run_fixture(), 2010L)
+  paths <- make_family_fixture(cohort)
+  for (pin in names(consumer_fixture_columns)) {
+    path <- paths[[pin]]
+    original <- nanoparquet::read_parquet(path)
+    for (column in consumer_fixture_columns[[pin]]) {
+      missing <- original
+      missing[[column]] <- NULL
+      nanoparquet::write_parquet(missing, path)
+      testthat::expect_error(
+        regeneration_env$validate_lpjml_pin_family(paths, cohort),
+        class = "lpjml_family_schema",
+        info = paste(pin, column)
+      )
+    }
+    nanoparquet::write_parquet(original, path)
+  }
+})
+
+testthat::test_that("every registered output has a complete consumer contract", {
+  cohort <- regeneration_env$lpjml_pin_cohort(make_run_fixture(), 2010L)
+  paths <- make_family_fixture(cohort)
+  e <- new.env(parent = regeneration_env)
+  e$validate_lpjml_pin_family <- regeneration_env$validate_lpjml_pin_family
+  environment(e$validate_lpjml_pin_family) <- e
+  e$lpjml_pin_consumer_columns <- function() list()
+  testthat::expect_error(
+    e$validate_lpjml_pin_family(paths, cohort),
+    class = "lpjml_family_schema"
+  )
 })

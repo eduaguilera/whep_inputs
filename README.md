@@ -133,9 +133,13 @@ paths <- regenerate_whep_lpjml_pins(
 ```
 
 Before generation, every consumed NetCDF must identify the same simulation
-(`source`, `GIT_hash`, `history`) and cover the requested years. The complete
+(`source`, `GIT_hash`, `history`) and cover the requested years. Native
+axes must use supported no-leap day units, begin in the same year, remain
+strictly increasing and continuous, and carry every actual calendar month. The complete
 local family is checked again before comparison or any upload: missing,
-empty, malformed, wrong-year or conflicting-vintage members abort. The
+empty, wrong-year or conflicting-vintage members abort. Every registered
+artifact needs its full consumer schema, including non-comparator value
+columns; malformed artifacts abort before the first upload. The
 `lpjml-family-manifest.csv` records all seven files, their actual year sets,
 input cohort and checksums; it is also attached to the returned paths as
 `lpjml_manifest`. Existing producer definitions remain in WHEP.
